@@ -1,137 +1,241 @@
 // ==UserScript==
 // @name         コンテキスト・キーパー（仮）プロトタイプ
 // @namespace    http://tampermonkey.net/
-// @version      0.1
-// @description  AIの文脈忘れを防ぐためのメーターとセーブボタン
-// @author       AI Developer
+// @version      0.2
+// @description  AIの文脈忘れを防ぐためのトークン推計メーターと自動セーブ支援
+// @author       taka-keeper
 // @match        https://gemini.google.com/*
 // @match        https://chatgpt.com/*
+// @match        https://claude.ai/*
 // @grant        none
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // === 設定（プロデューサー側で変更可能） ===
-    // ※テストですぐにゲージが上がるよう、一旦「1万文字」を限界値にしています。
-    const LIMIT_CHARS = 10000;
-    const WARNING_THRESHOLD = 0.8; // 80% (8,000文字) で警告開始
-    const SAVE_PROMPT = "ここまでの決定事項を要約して出力せよ。次回に引き継ぐための設定ファイルとして箇条書きでまとめること。";
+    // === 設定値（テスト用に低めの15,000トークンに設定中） ===
+    const LIMIT_TOKENS = 15000;
+    const WARNING_THRESHOLD = 0.75; // 75%で注意（黄）
+    const DANGER_THRESHOLD = 0.90;  // 90%で危険（赤）
+    const SAVE_PROMPT = "【引き継ぎ用セーブ】ここまでの議論・決定事項・現在のコードや設定の全体像を、次の新しいチャットにそのまま貼り付けて引き継げるよう、構造化された箇条書きで要約して出力してください。";
 
-    // === UI生成 ===
+    // === UI生成（ダークテーマ＆最小化対応） ===
     const container = document.createElement('div');
-    container.style.position = 'fixed';
-    container.style.top = '20px';
-    container.style.right = '20px';
-    container.style.padding = '15px';
-    container.style.backgroundColor = 'rgba(255, 255, 255, 0.95)';
-    container.style.border = '2px solid #ccc';
-    container.style.borderRadius = '8px';
-    container.style.zIndex = '999999';
-    container.style.boxShadow = '0 4px 10px rgba(0,0,0,0.2)';
-    container.style.fontFamily = 'sans-serif';
-    container.style.minWidth = '220px';
-    container.style.pointerEvents = 'auto';
+    Object.assign(container.style, {
+        position: 'fixed',
+        top: '16px',
+        right: '16px',
+        padding: '12px 14px',
+        backgroundColor: 'rgba(24, 24, 27, 0.92)',
+        color: '#f4f4f5',
+        border: '1px solid #3f3f46',
+        borderRadius: '10px',
+        zIndex: '2147483647',
+        boxShadow: '0 8px 20px rgba(0,0,0,0.4)',
+        fontFamily: 'system-ui, -apple-system, sans-serif',
+        width: '240px',
+        backdropFilter: 'blur(6px)',
+        transition: 'border-color 0.3s ease'
+    });
 
-    const title = document.createElement('div');
-    title.innerText = '🧠 コンテキスト・キーパー';
-    title.style.fontWeight = 'bold';
-    title.style.marginBottom = '10px';
-    title.style.fontSize = '14px';
-    title.style.color = '#333';
-    container.appendChild(title);
+    // ヘッダー（タイトル＋最小化ボタン）
+    const header = document.createElement('div');
+    Object.assign(header.style, {
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: '8px'
+    });
+
+    const title = document.createElement('span');
+    title.innerText = '🧠 Context-Keeper v0.2';
+    Object.assign(title.style, {
+        fontWeight: 'bold',
+        fontSize: '13px',
+        letterSpacing: '0.3px'
+    });
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.innerText = '－';
+    Object.assign(toggleBtn.style, {
+        background: 'transparent',
+        border: 'none',
+        color: '#a1a1aa',
+        cursor: 'pointer',
+        fontSize: '14px',
+        padding: '0 4px',
+        lineHeight: '1'
+    });
+
+    header.appendChild(title);
+    header.appendChild(toggleBtn);
+    container.appendChild(header);
+
+    // メインボディ（最小化時に隠す領域）
+    const bodyArea = document.createElement('div');
 
     const meterInfo = document.createElement('div');
-    meterInfo.style.fontSize = '12px';
-    meterInfo.style.marginBottom = '5px';
-    meterInfo.style.color = '#666';
-    container.appendChild(meterInfo);
+    Object.assign(meterInfo.style, {
+        fontSize: '11px',
+        marginBottom: '6px',
+        color: '#d4d4d8',
+        display: 'flex',
+        justifyContent: 'space-between'
+    });
+    bodyArea.appendChild(meterInfo);
 
     const meterBarContainer = document.createElement('div');
-    meterBarContainer.style.width = '100%';
-    meterBarContainer.style.height = '12px';
-    meterBarContainer.style.backgroundColor = '#e0e0e0';
-    meterBarContainer.style.borderRadius = '6px';
-    meterBarContainer.style.overflow = 'hidden';
-    container.appendChild(meterBarContainer);
+    Object.assign(meterBarContainer.style, {
+        width: '100%',
+        height: '8px',
+        backgroundColor: '#27272a',
+        borderRadius: '4px',
+        overflow: 'hidden'
+    });
 
     const meterBar = document.createElement('div');
-    meterBar.style.width = '0%';
-    meterBar.style.height = '100%';
-    meterBar.style.backgroundColor = '#4CAF50'; // 初期は安全（緑）
-    meterBar.style.transition = 'width 0.5s ease-in-out, background-color 0.5s ease';
+    Object.assign(meterBar.style, {
+        width: '0%',
+        height: '100%',
+        backgroundColor: '#10b981',
+        transition: 'width 0.4s ease, background-color 0.4s ease'
+    });
     meterBarContainer.appendChild(meterBar);
+    bodyArea.appendChild(meterBarContainer);
 
     const alertMsg = document.createElement('div');
-    alertMsg.style.fontSize = '12px';
-    alertMsg.style.color = '#d32f2f';
-    alertMsg.style.fontWeight = 'bold';
-    alertMsg.style.marginTop = '10px';
-    alertMsg.style.display = 'none';
-    alertMsg.innerText = '⚠️ AIの記憶忘却が近づいています。設定を保存してください。';
-    container.appendChild(alertMsg);
+    Object.assign(alertMsg.style, {
+        fontSize: '11px',
+        color: '#fca5a5',
+        marginTop: '8px',
+        lineHeight: '1.4',
+        display: 'none'
+    });
+    alertMsg.innerText = '⚠️ 文脈忘却（トコロテン）の危険域です。要約の保存を推奨します。';
+    bodyArea.appendChild(alertMsg);
 
+    // セーブボタン（常時表示）
     const saveBtn = document.createElement('button');
-    saveBtn.innerText = '💾 ワンタッチ・セーブ';
-    saveBtn.style.marginTop = '10px';
-    saveBtn.style.padding = '8px 12px';
-    saveBtn.style.width = '100%';
-    saveBtn.style.cursor = 'pointer';
-    saveBtn.style.backgroundColor = '#1976d2';
-    saveBtn.style.color = 'white';
-    saveBtn.style.border = 'none';
-    saveBtn.style.borderRadius = '4px';
-    saveBtn.style.fontWeight = 'bold';
-    saveBtn.style.display = 'none'; // 警告時のみ表示
-    container.appendChild(saveBtn);
+    saveBtn.innerText = '💾 引き継ぎプロンプトを挿入';
+    Object.assign(saveBtn.style, {
+        marginTop: '10px',
+        padding: '7px 10px',
+        width: '100%',
+        cursor: 'pointer',
+        backgroundColor: '#2563eb',
+        color: '#ffffff',
+        border: 'none',
+        borderRadius: '6px',
+        fontWeight: 'bold',
+        fontSize: '12px',
+        display: 'block',
+        transition: 'background-color 0.2s ease'
+    });
+    bodyArea.appendChild(saveBtn);
 
+    container.appendChild(bodyArea);
     document.body.appendChild(container);
 
-    // === セーブボタンのイベント（クリップボードへのコピー） ===
+    // === 最小化トグル処理 ===
+    let isMinimized = false;
+    toggleBtn.addEventListener('click', () => {
+        isMinimized = !isMinimized;
+        bodyArea.style.display = isMinimized ? 'none' : 'block';
+        header.style.marginBottom = isMinimized ? '0' : '8px';
+        toggleBtn.innerText = isMinimized ? '＋' : '－';
+    });
+
+    // === 簡易トークン推計ロジック ===
+    // 英数字・記号(ASCII)は約0.3トークン、日本語などのマルチバイト文字は約1.2トークンとして推計
+    function estimateTokens(text) {
+        if (!text) return 0;
+        const cleanText = text.replace(/\s+/g, '');
+        let asciiCount = 0;
+        let nonAsciiCount = 0;
+
+        for (let i = 0; i < cleanText.length; i++) {
+            if (cleanText.charCodeAt(i) <= 127) {
+                asciiCount++;
+            } else {
+                nonAsciiCount++;
+            }
+        }
+        return Math.ceil((asciiCount * 0.3) + (nonAsciiCount * 1.2));
+    }
+
+    // === チャット入力欄への自動流し込み＋クリップボード保存 ===
     saveBtn.addEventListener('click', () => {
-        navigator.clipboard.writeText(SAVE_PROMPT).then(() => {
-            alert(`【コンテキスト・キーパー】\n以下のプロンプトをクリップボードにコピーしました。\nチャット入力欄にペーストして送信してください。\n\n「${SAVE_PROMPT}」`);
-        }).catch(err => {
-            alert('コピーに失敗しました。手動で入力してください。');
-        });
+        navigator.clipboard.writeText(SAVE_PROMPT).catch(() => {});
+
+        // 各AIサービスの入力欄（textarea または contenteditable）を探索
+        const inputEl = document.querySelector('#prompt-textarea') // ChatGPT
+                     || document.querySelector('div[contenteditable="true"]') // Gemini / Claude
+                     || document.querySelector('textarea');
+
+        if (inputEl) {
+            inputEl.focus();
+            if (inputEl.tagName.toLowerCase() === 'textarea') {
+                inputEl.value = SAVE_PROMPT;
+                inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+            } else {
+                // contenteditable要素への挿入
+                inputEl.innerText = SAVE_PROMPT;
+                inputEl.dispatchEvent(new InputEvent('input', { bubbles: true }));
+            }
+            saveBtn.innerText = '✅ 入力欄にセット＆コピー完了！';
+        } else {
+            alert(`【Context-Keeper】\n入力欄が見つからなかったため、クリップボードにコピーしました。手動でペーストしてください。\n\n${SAVE_PROMPT}`);
+        }
+
+        setTimeout(() => {
+            saveBtn.innerText = '💾 引き継ぎプロンプトを挿入';
+        }, 3000);
     });
 
     // === メーター更新ロジック ===
     function updateMeter() {
-        // 対象のチャット領域をなるべく絞るが、無ければ全体から取得
         const mainContent = document.querySelector('main') || document.body;
-        // 改行や空白を削除した純粋な文字数をカウント
-        const textContent = mainContent.innerText.replace(/\s+/g, '');
-        const currentChars = textContent.length;
-        
-        const ratio = Math.min(currentChars / LIMIT_CHARS, 1);
+        // 自身のUIテキスト分を概算減算
+        const rawText = mainContent.innerText || '';
+        const estTokens = Math.max(0, estimateTokens(rawText) - 35);
+
+        const ratio = Math.min(estTokens / LIMIT_TOKENS, 1);
         const percent = Math.floor(ratio * 100);
-        
-        meterInfo.innerText = `推計文字数: ${currentChars.toLocaleString()} / ${LIMIT_CHARS.toLocaleString()}`;
+
+        meterInfo.innerHTML = `<span>推計: <b>${estTokens.toLocaleString()}</b> / ${LIMIT_TOKENS.toLocaleString()} tok</span><span>${percent}%</span>`;
         meterBar.style.width = `${percent}%`;
 
-        // 色とアラートの制御
-        if (ratio >= 1) {
-            meterBar.style.backgroundColor = '#d32f2f'; // 危険（赤）
-            container.style.borderColor = '#d32f2f';
+        if (ratio >= DANGER_THRESHOLD) {
+            meterBar.style.backgroundColor = '#ef4444'; // 危険（赤）
+            container.style.borderColor = '#ef4444';
             alertMsg.style.display = 'block';
-            saveBtn.style.display = 'block';
         } else if (ratio >= WARNING_THRESHOLD) {
-            meterBar.style.backgroundColor = '#fbc02d'; // 注意（黄）
-            container.style.borderColor = '#fbc02d';
+            meterBar.style.backgroundColor = '#f59e0b'; // 注意（黄）
+            container.style.borderColor = '#f59e0b';
             alertMsg.style.display = 'block';
-            saveBtn.style.display = 'block';
         } else {
-            meterBar.style.backgroundColor = '#4CAF50'; // 安全（緑）
-            container.style.borderColor = '#ccc';
+            meterBar.style.backgroundColor = '#10b981'; // 安全（緑）
+            container.style.borderColor = '#3f3f46';
             alertMsg.style.display = 'none';
-            saveBtn.style.display = 'none';
         }
     }
 
-    // 2秒ごとに文字数をチェック
-    setInterval(updateMeter, 2000);
+    // === MutationObserverによるスマートなDOM監視（デバウンス付き） ===
+    let debounceTimer = null;
+    const observer = new MutationObserver(() => {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            updateMeter();
+        }, 800); // 描画負荷を下げるため変化停止から0.8秒後に再計算
+    });
+
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true
+    });
+
     // 初回実行
-    updateMeter();
+    setTimeout(updateMeter, 1000);
 
 })();
